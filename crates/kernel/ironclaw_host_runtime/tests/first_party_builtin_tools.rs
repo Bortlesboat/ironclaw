@@ -3875,6 +3875,73 @@ async fn builtin_time_now_rejects_invalid_utc_offset() {
 }
 
 #[tokio::test]
+async fn builtin_time_input_issue_reaches_the_dispatch_boundary() {
+    // The production failure (#7191): a natural-language timestamp came back as
+    // a bare `input_encode` with no detail. The typed issue must survive the
+    // runtime, not just the time.rs helper.
+    let runtime = runtime();
+    let failure = invoke_failure_with_context(
+        &runtime,
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "parse",
+            "input": "24 hours ago",
+            "timezone": "America/Los_Angeles"
+        }),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::InputEncode);
+    let issue = failure_input_issue(
+        &failure,
+        "input",
+        DispatchInputIssueCode::InvalidValue,
+        "relative time expression",
+    );
+    assert_eq!(issue.received.as_deref(), Some("24 hours ago"));
+    assert!(
+        issue
+            .expected
+            .as_deref()
+            .is_some_and(|expected| expected.contains("operation \"shift\"")),
+        "expected text should point at shift, got {issue:?}"
+    );
+}
+
+#[tokio::test]
+async fn builtin_time_shift_offsets_through_host_runtime() {
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "shift",
+            "input": "2026-08-04T21:06:40Z",
+            "days": -14,
+            "timezone": "UTC"
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["iso"], json!("2026-07-21T21:06:40+00:00"));
+    assert_eq!(output["timezone"], json!("UTC"));
+
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        TIME_CAPABILITY_ID,
+        json!({"operation": "shift", "days": i64::MAX}),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::InputEncode);
+    assert_failure_has_input_issue(
+        &failure,
+        "days",
+        DispatchInputIssueCode::InvalidValue,
+        "overflowing shift component",
+    );
+}
+
+#[tokio::test]
 async fn builtin_echo_preserves_null_string_in_required_field() {
     // The optional-sentinel normalization must never touch required fields, so a
     // deliberate "null" payload still round-trips unchanged.
