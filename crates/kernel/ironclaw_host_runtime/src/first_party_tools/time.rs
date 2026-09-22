@@ -204,7 +204,7 @@ fn shift_components(input: &Value) -> Result<Vec<ShiftComponent>, FirstPartyCapa
             continue;
         };
         let Some(count) = value.as_i64() else {
-            return Err(time_input_error(invalid_value(
+            return Err(time_input_error(type_mismatch(
                 field,
                 &received_text(value),
                 "signed integer",
@@ -268,9 +268,13 @@ fn required_timezone(
     input: &Value,
     field: &str,
 ) -> Result<(Tz, String), FirstPartyCapabilityError> {
-    let Some(name) = input.get(field).and_then(Value::as_str) else {
+    // A declared-optional field set to null is stripped upstream by
+    // `normalize_optional_null_sentinels`, so absent and null both arrive here as absent;
+    // anything else present is a wrong type, not a missing field.
+    let Some(value) = input.get(field) else {
         return Err(time_input_error(missing_required(field, TIMEZONE_EXPECTED)));
     };
+    let name = timezone_name(field, value)?;
     Ok((parse_timezone(field, name)?, name.to_string()))
 }
 
@@ -279,11 +283,25 @@ fn optional_timezone(
     fields: &[&str],
 ) -> Result<Option<(Tz, String)>, FirstPartyCapabilityError> {
     for field in fields {
-        if let Some(name) = input.get(*field).and_then(Value::as_str) {
-            return Ok(Some((parse_timezone(field, name)?, name.to_string())));
-        }
+        let Some(value) = input.get(*field) else {
+            continue;
+        };
+        let name = timezone_name(field, value)?;
+        return Ok(Some((parse_timezone(field, name)?, name.to_string())));
     }
     Ok(None)
+}
+
+/// A timezone field has to be a string; a number or bool is a type error, not a
+/// missing field and not an unparseable zone.
+fn timezone_name<'a>(field: &str, value: &'a Value) -> Result<&'a str, FirstPartyCapabilityError> {
+    value.as_str().ok_or_else(|| {
+        time_input_error(type_mismatch(
+            field,
+            &received_text(value),
+            TIMEZONE_EXPECTED,
+        ))
+    })
 }
 
 fn parse_timezone(field: &str, name: &str) -> Result<Tz, FirstPartyCapabilityError> {
@@ -344,11 +362,14 @@ fn parse_timestamp(
     {
         return Ok(dt);
     }
-    Err(time_input_error(invalid_value(
-        path,
-        &received_text(input),
-        TIMESTAMP_EXPECTED,
-    )))
+    let received = received_text(input);
+    Err(time_input_error(
+        if input.is_string() || input.is_number() {
+            invalid_value(path, &received, TIMESTAMP_EXPECTED)
+        } else {
+            type_mismatch(path, &received, TIMESTAMP_EXPECTED)
+        },
+    ))
 }
 
 fn parse_unix_number(number: &Number) -> Option<DateTime<Utc>> {
@@ -484,12 +505,19 @@ fn missing_required(path: &str, expected: &str) -> DispatchInputIssue {
 fn invalid_value(path: &str, received: &str, expected: &str) -> DispatchInputIssue {
     DispatchInputIssue::new(path, DispatchInputIssueCode::InvalidValue)
         .expected(expected)
-        .received(
-            received
-                .chars()
-                .take(MAX_RECEIVED_CHARS)
-                .collect::<String>(),
-        )
+        .received(bounded_received(received))
+}
+
+/// The field carries the wrong JSON type, as opposed to a right-typed value that does not
+/// parse ([`invalid_value`]) or a field that is not there at all ([`missing_required`]).
+fn type_mismatch(path: &str, received: &str, expected: &str) -> DispatchInputIssue {
+    DispatchInputIssue::new(path, DispatchInputIssueCode::TypeMismatch)
+        .expected(expected)
+        .received(bounded_received(received))
+}
+
+fn bounded_received(received: &str) -> String {
+    received.chars().take(MAX_RECEIVED_CHARS).collect()
 }
 
 fn received_text(value: &Value) -> String {
@@ -541,7 +569,7 @@ mod tests {
 
     #[test]
     fn input_failures_carry_the_offending_path_and_code() {
-        use DispatchInputIssueCode::{InvalidValue, MissingRequired};
+        use DispatchInputIssueCode::{InvalidValue, MissingRequired, TypeMismatch};
 
         let cases: Vec<(&str, Value, &str, DispatchInputIssueCode, Option<&str>)> = vec![
             (
@@ -673,8 +701,31 @@ mod tests {
                 "non-integer shift component",
                 json!({"operation": "shift", "hours": 1.5}),
                 "hours",
-                InvalidValue,
+                TypeMismatch,
                 Some("1.5"),
+            ),
+            (
+                // A present-but-wrong-typed field is a type error; `MissingRequired` is
+                // reserved for a field that is absent (or null, stripped upstream).
+                "numeric to_timezone",
+                json!({"operation": "convert", "input": VALID, "to_timezone": 5}),
+                "to_timezone",
+                TypeMismatch,
+                Some("5"),
+            ),
+            (
+                "boolean timezone",
+                json!({"operation": "parse", "input": VALID, "timezone": true}),
+                "timezone",
+                TypeMismatch,
+                Some("true"),
+            ),
+            (
+                "timestamp operand of the wrong type",
+                json!({"operation": "parse", "input": ["2026-08-04T21:06:40Z"]}),
+                "input",
+                TypeMismatch,
+                Some("[\"2026-08-04T21:06:40Z\"]"),
             ),
         ];
 

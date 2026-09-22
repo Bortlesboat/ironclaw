@@ -3907,6 +3907,27 @@ async fn builtin_time_input_issue_reaches_the_dispatch_boundary() {
             .is_some_and(|expected| expected.contains("operation \"shift\"")),
         "expected text should point at shift, got {issue:?}"
     );
+
+    // Nothing upstream of dispatch rejects a wrong-typed field, so `to_timezone: 5`
+    // reaches the tool. It is a type error: `MissingRequired` is reserved for a field
+    // that is absent, and telling the model a field it sent is missing sends it to fix
+    // the wrong thing.
+    let wrong_type = invoke_failure_with_context(
+        &runtime,
+        TIME_CAPABILITY_ID,
+        json!({"operation": "convert", "input": "2026-08-04T21:06:40Z", "to_timezone": 5}),
+        execution_context([TIME_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(wrong_type.kind, FailureKind::InputEncode);
+    let wrong_type_issue = failure_input_issue(
+        &wrong_type,
+        "to_timezone",
+        DispatchInputIssueCode::TypeMismatch,
+        "numeric to_timezone",
+    );
+    assert_eq!(wrong_type_issue.received.as_deref(), Some("5"));
 }
 
 #[tokio::test]
