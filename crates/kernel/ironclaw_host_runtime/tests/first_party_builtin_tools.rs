@@ -3996,6 +3996,29 @@ async fn builtin_time_shift_offsets_through_host_runtime() {
 }
 
 #[tokio::test]
+async fn builtin_time_shift_accepts_signed_component_cancellation() {
+    for (sign, expected) in [
+        (1_i64, "2026-08-04T19:24:55+00:00"),
+        (-1_i64, "2026-08-04T04:35:05+00:00"),
+    ] {
+        let output = invoke(
+            TIME_CAPABILITY_ID,
+            json!({
+                "operation": "shift",
+                "input": "2026-08-04T12:00:00Z",
+                "seconds": sign * 9_223_372_036_854_775_i64,
+                "minutes": sign * 153_722_867_280_912_i64,
+                "hours": sign * -2_562_047_788_015_i64,
+                "days": sign * -106_751_991_167_i64
+            }),
+        )
+        .await
+        .expect("representable final offset");
+        assert_eq!(output["utc_iso"], json!(expected));
+    }
+}
+
+#[tokio::test]
 async fn builtin_echo_preserves_null_string_in_required_field() {
     // The optional-sentinel normalization must never touch required fields, so a
     // deliberate "null" payload still round-trips unchanged.

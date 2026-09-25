@@ -156,8 +156,8 @@ fn time_diff(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
 
 fn time_shift(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
     let components = shift_components(input)?;
-    // The largest component is also the one blamed if the summed offset is
-    // representable but lands outside chrono's date range.
+    // Report the largest component if the summed offset or resulting date
+    // is outside chrono's supported range.
     let Some(dominant) = components
         .iter()
         .max_by_key(|component| component.delta.abs())
@@ -175,12 +175,15 @@ fn time_shift(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
         }
         None => Utc::now(),
     };
-    let mut offset = TimeDelta::zero();
-    for component in &components {
-        offset = offset
-            .checked_add(&component.delta)
-            .ok_or_else(|| component.out_of_range())?;
-    }
+    // Signed components may cancel after a prefix exceeds TimeDelta's range.
+    let total_seconds = components
+        .iter()
+        .map(|component| i128::from(component.delta.num_seconds()))
+        .sum::<i128>();
+    let offset = i64::try_from(total_seconds)
+        .ok()
+        .and_then(TimeDelta::try_seconds)
+        .ok_or_else(|| dominant.out_of_range())?;
     let shifted = base
         .checked_add_signed(offset)
         .ok_or_else(|| dominant.out_of_range())?;
@@ -716,6 +719,28 @@ mod tests {
                 "days",
                 InvalidValue,
                 Some("9223372036854775807"),
+            ),
+            (
+                "positive summed shift overflows the offset",
+                json!({
+                    "operation": "shift",
+                    "seconds": 9_223_372_036_854_775_i64,
+                    "minutes": 153_722_867_280_912_i64
+                }),
+                "seconds",
+                InvalidValue,
+                Some("9223372036854775"),
+            ),
+            (
+                "negative summed shift overflows the offset",
+                json!({
+                    "operation": "shift",
+                    "seconds": -9_223_372_036_854_775_i64,
+                    "minutes": -153_722_867_280_912_i64
+                }),
+                "seconds",
+                InvalidValue,
+                Some("-9223372036854775"),
             ),
             (
                 "shift lands outside the supported date range",
