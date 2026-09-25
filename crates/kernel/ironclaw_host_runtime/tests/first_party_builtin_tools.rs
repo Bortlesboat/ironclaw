@@ -3860,6 +3860,39 @@ async fn builtin_time_now_accepts_utc_offset_compatibility_input() {
 }
 
 #[tokio::test]
+async fn builtin_time_rejects_wrong_typed_optional_fields_through_dispatch() {
+    let runtime = runtime();
+    for field in ["operation", "utc_offset"] {
+        for value in [json!(5), json!(true), json!([5]), json!({"value": 5})] {
+            let failure = invoke_failure_with_context(
+                &runtime,
+                TIME_CAPABILITY_ID,
+                json!({(field): value}),
+                execution_context([TIME_CAPABILITY_ID]),
+            )
+            .await;
+            assert_eq!(failure.kind, FailureKind::InputEncode);
+            let issue =
+                failure_input_issue(&failure, field, DispatchInputIssueCode::TypeMismatch, field);
+            assert_eq!(issue.received.as_deref(), Some(value.to_string().as_str()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn builtin_time_defaults_absent_and_null_optional_fields_through_dispatch() {
+    for input in [
+        json!({}),
+        json!({"operation": null, "utc_offset": null}),
+        json!({"operation": "null", "utc_offset": "null"}),
+    ] {
+        let output = invoke(TIME_CAPABILITY_ID, input).await.unwrap();
+        assert!(output.get("iso").and_then(Value::as_str).is_some());
+        assert!(output.get("utc_offset").is_none());
+    }
+}
+
+#[tokio::test]
 async fn builtin_time_now_rejects_invalid_utc_offset() {
     let failure = invoke(
         TIME_CAPABILITY_ID,

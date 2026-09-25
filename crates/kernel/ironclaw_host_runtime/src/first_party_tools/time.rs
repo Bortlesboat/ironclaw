@@ -52,10 +52,16 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 }
 
 pub(super) fn dispatch(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
-    let operation = input
-        .get("operation")
-        .and_then(Value::as_str)
-        .unwrap_or("now");
+    let operation = match input.get("operation") {
+        None => "now",
+        Some(value) => value.as_str().ok_or_else(|| {
+            time_input_error(type_mismatch(
+                "operation",
+                &received_text(value),
+                "one of now, parse, convert, format, diff, shift",
+            ))
+        })?,
+    };
     match operation {
         "now" => time_now(input),
         "parse" => time_parse(input),
@@ -314,9 +320,16 @@ fn parse_timezone(field: &str, name: &str) -> Result<Tz, FirstPartyCapabilityErr
 fn optional_utc_offset(
     input: &Value,
 ) -> Result<Option<(FixedOffset, String)>, FirstPartyCapabilityError> {
-    let Some(name) = input.get("utc_offset").and_then(Value::as_str) else {
+    let Some(value) = input.get("utc_offset") else {
         return Ok(None);
     };
+    let name = value.as_str().ok_or_else(|| {
+        time_input_error(type_mismatch(
+            "utc_offset",
+            &received_text(value),
+            "UTC offset such as +03:00 or -07:00",
+        ))
+    })?;
     parse_utc_offset(name).map(Some)
 }
 
@@ -572,6 +585,20 @@ mod tests {
         use DispatchInputIssueCode::{InvalidValue, MissingRequired, TypeMismatch};
 
         let cases: Vec<(&str, Value, &str, DispatchInputIssueCode, Option<&str>)> = vec![
+            (
+                "numeric operation",
+                json!({"operation": 5}),
+                "operation",
+                TypeMismatch,
+                Some("5"),
+            ),
+            (
+                "numeric utc_offset",
+                json!({"utc_offset": 5}),
+                "utc_offset",
+                TypeMismatch,
+                Some("5"),
+            ),
             (
                 "unknown operation",
                 json!({"operation": "rewind"}),
